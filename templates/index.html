@@ -1,0 +1,52 @@
+
+   <!DOCTYPE html>
+<html>
+<head>
+    <title>TikTok Monitor API</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+        h1 { color: #333; }
+        pre { background-color: #f5f5f5; padding: 15px; border-radius: 5px; overflow: auto; }
+        .endpoint { background-color: #e9f7f9; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+        code { background-color: #f0f0f0; padding: 2px 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>TikTok Monitor API</h1>
+    <p>Use the following endpoints to monitor TikTok users for specific topics.</p>
+    
+    <div class="endpoint">
+        <h2>Start Monitoring (Cron Job)</h2>
+        <p>POST /api/monitor</p>
+        <pre>
+{
+  "handle": "username",
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "topics": ["topic1", "topic2", "topic3"],
+  "interval_seconds": 3600  /* How often to run the job (in seconds) */
+}
+        </pre>
+        <p>Returns a task ID that can be used to check the status. If interval_seconds is provided, creates a recurring job.</p>
+    </div>
+    
+    <div class="endpoint">
+        <h2>Check Task Status</h2>
+        <p>GET /api/task/&lt;task_id&gt;</p>
+        <p>Returns the current status and results if available.</p>
+    </div>
+
+    <div class="endpoint">
+        <h2>Stop a Scheduled Task</h2>
+        <p>POST /api/task/&lt;task_id&gt;/stop</p>
+        <p>Stops a running scheduled task.</p>
+    </div>
+
+    <div class="endpoint">
+        <h2>List All Tasks</h2>
+        <p>GET /api/tasks</p>
+        <p>Returns all tasks and their statuses.</p>
+    </div>
+</body>
+</html>
+    

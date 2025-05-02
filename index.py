@@ -145,12 +145,132 @@ import logging
 import os
 import subprocess
 import tempfile
-from datetime import datetime
 import concurrent.futures
 import openai
 from dotenv import load_dotenv
+from flask import Flask, request, jsonify, render_template
+from werkzeug.serving import run_simple
+import threading
+import uuid
+import schedule
+import threading
+import time
+from datetime import datetime, timedelta
+
 
 load_dotenv()
+# Create a dictionary to store background task results
+task_results = {}
+
+# Create Flask app
+app = Flask(__name__)
+
+# Create a directory for templates
+if not os.path.exists("templates"):
+    os.makedirs("templates")
+
+# Create a simple HTML template for the home page
+with open("templates/index.html", "w") as f:
+    f.write("""
+   <!DOCTYPE html>
+<html>
+<head>
+    <title>TikTok Monitor API</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+        h1 { color: #333; }
+        pre { background-color: #f5f5f5; padding: 15px; border-radius: 5px; overflow: auto; }
+        .endpoint { background-color: #e9f7f9; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+        code { background-color: #f0f0f0; padding: 2px 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>TikTok Monitor API</h1>
+    <p>Use the following endpoints to monitor TikTok users for specific topics.</p>
+    
+    <div class="endpoint">
+        <h2>Start Monitoring (Cron Job)</h2>
+        <p>POST /api/monitor</p>
+        <pre>
+{
+  "handle": "username",
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "topics": ["topic1", "topic2", "topic3"],
+  "interval_seconds": 3600  /* How often to run the job (in seconds) */
+}
+        </pre>
+        <p>Returns a task ID that can be used to check the status. If interval_seconds is provided, creates a recurring job.</p>
+    </div>
+    
+    <div class="endpoint">
+        <h2>Check Task Status</h2>
+        <p>GET /api/task/&lt;task_id&gt;</p>
+        <p>Returns the current status and results if available.</p>
+    </div>
+
+    <div class="endpoint">
+        <h2>Stop a Scheduled Task</h2>
+        <p>POST /api/task/&lt;task_id&gt;/stop</p>
+        <p>Stops a running scheduled task.</p>
+    </div>
+
+    <div class="endpoint">
+        <h2>List All Tasks</h2>
+        <p>GET /api/tasks</p>
+        <p>Returns all tasks and their statuses.</p>
+    </div>
+</body>
+</html>
+    """)
+
+def run_monitoring_task(task_id, handle, start_date, end_date, topics):
+    """
+    Run the monitoring task in background
+    """
+    try:
+        # Update task status
+        task_results[task_id]["status"] = "running"
+        
+        # Convert date strings to datetime and then to timestamps
+        start_timestamp = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_timestamp = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() + 86399)  # Add seconds to include the full day
+        
+        # Update the global variables for this task
+        global Tiktok_HANDLE, TOPICS, START_DATE, END_DATE
+        Tiktok_HANDLE = handle
+        TOPICS = topics
+        START_DATE = start_timestamp
+        END_DATE = end_timestamp
+        
+        # Fetch data
+        response_data = fetch_Tiktok_data()
+        
+        if response_data:
+            # Extract video URLs
+            video_urls = extract_video_urls(response_data)
+            
+            transcripts = {}
+            if video_urls:
+                # Process videos and generate transcripts
+                transcripts = process_videos_and_transcribe(video_urls)
+            
+            # Analyze posts and transcripts
+            analysis_results = analyze_topics(response_data, transcripts)
+            
+            # Store results
+            task_results[task_id]["status"] = "completed"
+            task_results[task_id]["results"] = analysis_results
+            task_results[task_id]["completed_at"] = datetime.now().isoformat()
+        else:
+            task_results[task_id]["status"] = "failed"
+            task_results[task_id]["error"] = "Failed to fetch data from API"
+    
+    except Exception as e:
+        logger.error(f"Error in monitoring task: {str(e)}")
+        task_results[task_id]["status"] = "failed"
+        task_results[task_id]["error"] = str(e)
+
 
 # Set up logging
 logging.basicConfig(
@@ -474,69 +594,228 @@ def analyze_topics(data, transcripts=None):
     
     return results
 
-if __name__ == "__main__":
-    logger.info("=" * 50)
-    logger.info("Tiktok Monitor Script - Starting execution")
+# Dictionary to store scheduled jobs
+scheduled_jobs = {}
+
+def run_scheduled_job(task_id, handle, start_date, end_date, topics):
+    """
+    Function that will be executed by the scheduled job
+    """
+    logger.info(f"Running scheduled job for task {task_id}")
     
-    # Fetch data from Ensemble API
-    response_data = fetch_Tiktok_data()
+    # Update task status to indicate it's running
+    if task_id in task_results:
+        task_results[task_id]["last_run"] = datetime.now().isoformat()
+        task_results[task_id]["status"] = "running"
     
-    if response_data:
-        # Extract video URLs from the response data
-        video_urls = extract_video_urls(response_data)
+    # Run the monitoring task
+    try:
+        # Convert date strings to datetime and then to timestamps
+        start_timestamp = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
+        end_timestamp = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() + 86399)  # Add seconds to include the full day
         
-        transcripts = {}
-        if video_urls:
-            # Process videos and generate transcripts
-            logger.info("Starting video processing and transcription...")
-            transcripts = process_videos_and_transcribe(video_urls)
+        # Update the global variables for this task
+        global Tiktok_HANDLE, TOPICS, START_DATE, END_DATE
+        Tiktok_HANDLE = handle
+        TOPICS = topics
+        START_DATE = start_timestamp
+        END_DATE = end_timestamp
+        
+        # Fetch data
+        response_data = fetch_Tiktok_data()
+        
+        if response_data:
+            # Extract video URLs
+            video_urls = extract_video_urls(response_data)
             
-            # Save all transcripts to a single file
-            with open("all_transcripts.json", "w", encoding="utf-8") as f:
-                json.dump(transcripts, f, indent=4, ensure_ascii=False)
-            logger.info("All transcripts saved to: all_transcripts.json")
+            transcripts = {}
+            if video_urls:
+                # Process videos and generate transcripts
+                transcripts = process_videos_and_transcribe(video_urls)
+            
+            # Analyze posts and transcripts
+            analysis_results = analyze_topics(response_data, transcripts)
+            
+            # Store results
+            if task_id in task_results:
+                task_results[task_id]["status"] = "active"  # Job is active but not currently running
+                task_results[task_id]["last_results"] = analysis_results
+                task_results[task_id]["last_completed"] = datetime.now().isoformat()
+                task_results[task_id]["runs"] = task_results[task_id].get("runs", 0) + 1
         else:
-            logger.warning("No videos found in the response data")
-        
-        # Analyze posts and transcripts
-        logger.info("Analyzing posts and transcripts...")
-        analysis_results = analyze_topics(response_data, transcripts)
-        
-        # Save analysis results
-        with open("analysis_results.json", "w", encoding="utf-8") as f:
-            json.dump(analysis_results, f, indent=4, ensure_ascii=False)
-        logger.info("Analysis results saved to: analysis_results.json")
-        
-        # Output summary
-        logger.info("-" * 50)
-        logger.info("ANALYSIS SUMMARY")
-        logger.info("-" * 50)
-        
-        # Sort by combined score
-        sorted_results = sorted(
-            analysis_results.items(), 
-            key=lambda x: x[1].get('combined_score', 0), 
-            reverse=True
-        )
-        
-        for post_id, result in sorted_results:
-            logger.info(f"Post ID: {post_id}")
-            logger.info(f"  Combined Score: {result.get('combined_score', 0):.1f}/100")
-            logger.info(f"  Keyword Score: {result.get('keyword_score', 0):.1f}/100")
-            
-            if result.get('openai_analysis'):
-                logger.info(f"  OpenAI Score: {result['openai_analysis'].get('score', 0):.1f}/100")
-                logger.info(f"  Reasoning: {result['openai_analysis'].get('reasoning', 'N/A')}")
-                
-            if 'translated' in result:
-                logger.info(f"  Translation performed: {result['translated']}")
-            
-            logger.info(f"  Keyword Matches: {', '.join(result.get('keyword_matches', []))}")
-            logger.info("-" * 30)
-        
-        logger.info("Script executed successfully")
-    else:
-        logger.error("Script execution failed")
+            if task_id in task_results:
+                task_results[task_id]["status"] = "active"  # Still active despite error
+                task_results[task_id]["last_error"] = "Failed to fetch data from API"
+                task_results[task_id]["last_error_time"] = datetime.now().isoformat()
     
-    logger.info("Tiktok Monitor Script - Execution complete")
+    except Exception as e:
+        logger.error(f"Error in scheduled job: {str(e)}")
+        if task_id in task_results:
+            task_results[task_id]["status"] = "active"  # Still active despite error
+            task_results[task_id]["last_error"] = str(e)
+            task_results[task_id]["last_error_time"] = datetime.now().isoformat()
+
+def scheduler_thread():
+    """
+    Background thread that runs the scheduler
+    """
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+# Start the scheduler thread when the app starts
+def start_scheduler():
+    thread = threading.Thread(target=scheduler_thread)
+    thread.daemon = True
+    thread.start()
+    logger.info("Scheduler thread started")
+
+def stop_job(task_id):
+    """
+    Stop a scheduled job
+    """
+    if task_id in scheduled_jobs:
+        schedule.cancel_job(scheduled_jobs[task_id])
+        del scheduled_jobs[task_id]
+        
+        if task_id in task_results:
+            task_results[task_id]["status"] = "stopped"
+            task_results[task_id]["stopped_at"] = datetime.now().isoformat()
+        
+        logger.info(f"Stopped scheduled job for task {task_id}")
+        return True
+    return False
+
+@app.route('/')
+def home():
+    """Homepage with API documentation"""
+    return render_template('index.html')
+
+@app.route('/api/monitor', methods=['POST'])
+def start_monitoring():
+    """
+    Start a monitoring task with the given parameters
+    Expects JSON with handle, start_date, end_date, topics, and interval_seconds
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        required_fields = ['handle', 'start_date', 'end_date', 'topics']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        # Check for interval_seconds (cron job frequency)
+        interval_seconds = data.get('interval_seconds', 0)
+        
+        # Generate a task ID
+        task_id = str(uuid.uuid4())
+        
+        # Store initial task information
+        task_results[task_id] = {
+            "id": task_id,
+            "handle": data['handle'],
+            "start_date": data['start_date'],
+            "end_date": data['end_date'],
+            "topics": data['topics'],
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # If interval_seconds is provided, schedule a recurring job
+        if interval_seconds and interval_seconds > 0:
+            # Add cron job details to task info
+            task_results[task_id]["status"] = "scheduled"
+            task_results[task_id]["interval_seconds"] = interval_seconds
+            task_results[task_id]["next_run"] = (datetime.now() + timedelta(seconds=interval_seconds)).isoformat()
+            
+            # Schedule the job
+            job = schedule.every(interval_seconds).seconds.do(
+                run_scheduled_job, 
+                task_id, 
+                data['handle'], 
+                data['start_date'], 
+                data['end_date'], 
+                data['topics']
+            )
+            
+            # Store the job reference
+            scheduled_jobs[task_id] = job
+            
+            logger.info(f"Scheduled recurring job for task {task_id} every {interval_seconds} seconds")
+            
+            # Run the job immediately for the first time
+            threading.Thread(
+                target=run_scheduled_job,
+                args=(task_id, data['handle'], data['start_date'], data['end_date'], data['topics'])
+            ).start()
+            
+            return jsonify({
+                "task_id": task_id,
+                "status": "scheduled",
+                "message": f"Monitoring task scheduled to run every {interval_seconds} seconds",
+                "next_run": task_results[task_id]["next_run"]
+            })
+        else:
+            # Run as a one-time task (original behavior)
+            task_results[task_id]["status"] = "pending"
+            
+            # Start a background thread for the task
+            thread = threading.Thread(
+                target=run_monitoring_task,
+                args=(task_id, data['handle'], data['start_date'], data['end_date'], data['topics'])
+            )
+            thread.daemon = True
+            thread.start()
+            
+            return jsonify({
+                "task_id": task_id,
+                "status": "pending",
+                "message": "One-time monitoring task started"
+            })
+    
+    except Exception as e:
+        logger.error(f"Error starting monitoring task: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# Add endpoints to manage scheduled jobs
+@app.route('/api/task/<task_id>/stop', methods=['POST'])
+def stop_monitoring_task(task_id):
+    """
+    Stop a scheduled monitoring task
+    """
+    if task_id in task_results:
+        if stop_job(task_id):
+            return jsonify({
+                "task_id": task_id,
+                "status": "stopped",
+                "message": "Scheduled task has been stopped"
+            })
+        else:
+            return jsonify({
+                "error": "Task exists but is not a scheduled job or has already been stopped"
+            }), 400
+    else:
+        return jsonify({"error": "Task not found"}), 404
+
+@app.route('/api/tasks', methods=['GET'])
+def list_tasks():
+    """
+    List all tasks and their status
+    """
+    return jsonify({
+        "tasks": list(task_results.values()),
+        "active_scheduled_tasks": len(scheduled_jobs)
+    })
+
+# Add this to your main block to start the scheduler
+if __name__ == "__main__":
+    # Start the scheduler thread
+    start_scheduler()
+     
+    # Original script execution logic
     logger.info("=" * 50)
+    logger.info("TikTok Monitor Web Server - Starting")
+    
+    # Run the Flask app
+    run_simple('0.0.0.0', 3000, app, use_reloader=True, use_debugger=True)
