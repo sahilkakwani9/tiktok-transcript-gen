@@ -74,13 +74,63 @@ def analyze_with_openai(transcript, post_id):
             "reasoning": f"Error with OpenAI analysis: {str(e)}"
         }
 
+def translate_to_english(text, post_id):
+    """
+    Translate text to English using OpenAI
+    Returns the translated text
+    """
+    try:
+        logger.info(f"Translating transcript for post {post_id} to English...")
+        
+        # Prepare the prompt for OpenAI
+        prompt = f"""
+        Translate the following text to English. If the text is already in English, return it unchanged.
+        
+        Text: 
+        {text}
+        """
+        
+        # Call OpenAI API
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # Use appropriate model
+            messages=[
+                {"role": "system", "content": "You are an AI translator. Translate the given text to English. If the text is already in English, return it unchanged."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1500  # Adjust based on your expected transcript length
+        )
+        
+        # Extract the response
+        translated_text = response.choices[0].message.content.strip()
+        
+        # Check if translation was successful
+        if translated_text:
+            logger.info(f"Translation complete for post {post_id}. Characters: {len(translated_text)}")
+            
+            # Save translated transcript to file for reference
+            translation_path = f"translation_{post_id}.txt"
+            with open(translation_path, 'w', encoding='utf-8') as f:
+                f.write(translated_text)
+            logger.info(f"Saved translation to: {translation_path}")
+            
+            return translated_text
+        else:
+            logger.warning(f"Empty translation result for post {post_id}")
+            return text  # Return original text if translation failed
+    
+    except Exception as e:
+        logger.error(f"Error with translation: {str(e)}")
+        return text  # Return original text if translation failed
+
 """
 Tiktok Monitor Script - Ensemble API Integration
 
 This script monitors a specific Tiktok handle over a defined date range
 for specified topics, then makes an API call to Ensemble to fetch data.
 It also extracts video URLs and generates transcripts for videos in posts.
-The transcripts are then analyzed using OpenAI to determine relevance to tracked topics.
+The transcripts are translated to English if needed, then analyzed using OpenAI 
+to determine relevance to tracked topics.
 
 Static information:
 - Tiktok handle: mjaguilar_official
@@ -115,8 +165,8 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 # Static information
-Tiktok_HANDLE = "giucomia"
-TOPICS = ["base batches", "ETF", "XRP", "CRYPTO"]
+Tiktok_HANDLE = "mjaguilar_official"
+TOPICS = ["base batches", "ETF", "XRP", "CRYPTO", "NFT", "SOLANA", "SUI"]
 
 # Date range: April 30, 2025 to May 2, 2025
 # Convert to Unix timestamps
@@ -344,7 +394,7 @@ def process_videos_and_transcribe(video_urls):
 def analyze_topics(data, transcripts=None):
     """
     Analyze the response data and transcripts for the specified topics
-    Now includes both keyword matching and OpenAI analysis when available
+    Now includes keyword matching, translation to English, and OpenAI analysis
     """
     if not data or 'data' not in data:
         logger.warning("No data to analyze for topics")
@@ -391,10 +441,15 @@ def analyze_topics(data, transcripts=None):
             keyword_score = len(post_result["keyword_matches"]) / len(TOPICS) * 100 if TOPICS else 0
             post_result["keyword_score"] = keyword_score
             
-            # 3. Perform OpenAI analysis if we have a transcript and API key
+            # 3. Translate transcript to English if OpenAI API key is available
             if OPENAI_API_KEY and OPENAI_API_KEY != "YOUR_OPENAI_API_KEY_HERE":
                 try:
-                    openai_result = analyze_with_openai(transcript, post_id)
+                    # Translate the transcript to English
+                    translated_transcript = translate_to_english(transcript, post_id)
+                    post_result["translated"] = (translated_transcript != transcript)  # Track if translation occurred
+                    
+                    # 4. Perform OpenAI analysis on translated transcript
+                    openai_result = analyze_with_openai(translated_transcript, post_id)
                     post_result["openai_analysis"] = openai_result
                     
                     # Calculate combined score (average of keyword and OpenAI scores)
@@ -405,7 +460,7 @@ def analyze_topics(data, transcripts=None):
                                f"Keyword Score: {keyword_score}, OpenAI Score: {openai_score}, " +
                                f"Combined: {post_result['combined_score']}")
                 except Exception as e:
-                    logger.error(f"Error in OpenAI analysis for post {post_id}: {str(e)}")
+                    logger.error(f"Error in translation or OpenAI analysis for post {post_id}: {str(e)}")
                     # Fall back to keyword score
                     post_result["combined_score"] = keyword_score
             else:
@@ -472,6 +527,9 @@ if __name__ == "__main__":
             if result.get('openai_analysis'):
                 logger.info(f"  OpenAI Score: {result['openai_analysis'].get('score', 0):.1f}/100")
                 logger.info(f"  Reasoning: {result['openai_analysis'].get('reasoning', 'N/A')}")
+                
+            if 'translated' in result:
+                logger.info(f"  Translation performed: {result['translated']}")
             
             logger.info(f"  Keyword Matches: {', '.join(result.get('keyword_matches', []))}")
             logger.info("-" * 30)
